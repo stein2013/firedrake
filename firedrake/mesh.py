@@ -391,7 +391,7 @@ class MeshTopology(object):
             """Finish initialisation."""
             del self._callback
             if self.comm.size > 1:
-                self._plex.distributeOverlap(1)
+                self._plex.distributeOverlap(2)
             self._grown_halos = True
 
             if reorder:

@@ -645,7 +645,8 @@ def mark_entity_classes(PETSc.DM plex):
         PetscInt p, pStart, pEnd, cStart, cEnd, vStart, vEnd, fStart, fEnd
         PetscInt c, ncells, f, nfacets, ci, nclosure, vi, dim
         PetscInt depth, non_core, exec_halo, nroots, nleaves
-        PetscInt v_per_cell
+        PetscInt v_per_cell, supportSize, i
+        const PetscInt *support = NULL
         PetscInt *cells = NULL
         PetscInt *facets = NULL
         PetscInt *vertices = NULL
@@ -757,8 +758,8 @@ def mark_entity_classes(PETSc.DM plex):
             CHKERR(DMLabelSetValue(lbl_core, p, 1))
     CHKERR(DMLabelDestroyIndex(lbl_non_core))
 
-    # Halo facets that only touch halo vertices and halo cells need to
-    # be marked as non-exec.
+    # Facet for which closure(support(facet)) contains an owned entity
+    # need to be executed over.  All others can be marked as non_exec.
     nfacets = plex.getStratumSize("op2_exec_halo", 1)
     facet_is = plex.getStratumIS("op2_exec_halo", 1)
     CHKERR(ISGetIndices(facet_is.iset, &facets))
@@ -767,31 +768,24 @@ def mark_entity_classes(PETSc.DM plex):
             continue
 
         non_exec = PETSC_TRUE
-        # Check for halo vertices
-        CHKERR(DMPlexGetTransitiveClosure(plex.dm, facets[f],
-                                          PETSC_TRUE,
-                                          &nclosure,
-                                          &closure))
-        for ci in range(nclosure):
-            if vStart <= closure[2*ci] < vEnd:
+        CHKERR(DMPlexGetSupport(plex.dm, facets[f], &support))
+        CHKERR(DMPlexGetSupportSize(plex.dm, facets[f], &supportSize))
+
+        for i in range(supportSize):
+            c = support[i]
+            CHKERR(DMPlexGetTransitiveClosure(plex.dm, c,
+                                              PETSC_TRUE,
+                                              &nclosure,
+                                              &closure))
+            for ci in range(nclosure):
                 CHKERR(DMLabelHasPoint(lbl_exec, closure[2*ci], &has_point))
                 if not has_point:
                     # Touches a non-halo vertex, needs to be executed
                     # over.
                     non_exec = PETSC_FALSE
-        if non_exec:
-            # If we still think we're non-exec, check for halo cells
-            CHKERR(DMPlexGetTransitiveClosure(plex.dm, facets[f],
-                                              PETSC_FALSE,
-                                              &nclosure,
-                                              &closure))
-            for ci in range(nclosure):
-                if cStart <= closure[2*ci] < cEnd:
-                    CHKERR(DMLabelHasPoint(lbl_exec, closure[2*ci], &has_point))
-                    if not has_point:
-                        # Touches a non-halo cell, needs to be
-                        # executed over.
-                        non_exec = PETSC_FALSE
+                    break
+            if not non_exec:
+                break
         if non_exec:
             CHKERR(DMLabelSetValue(lbl_non_exec, facets[f], 1))
 
