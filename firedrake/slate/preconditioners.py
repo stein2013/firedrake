@@ -217,6 +217,11 @@ class HybridizationPC(PCBase):
         hdiv_projection_ksp.setFromOptions()
         self.hdiv_projection_ksp = hdiv_projection_ksp
 
+        # Switch to using the reconstructor over a KSP to get the
+        # HDiv conforming solution
+        opts = PETSc.Options()
+        self.recon_flag = bool(opts.getBool(prefix + "use_reconstructor", False))
+
     def _reconstruction_calls(self, split_mixed_op, split_trace_op):
         """This generates the reconstruction calls for the unknowns using the
         Lagrange multipliers.
@@ -273,6 +278,16 @@ class HybridizationPC(PCBase):
         self._sub_unknown()
         # Recover the eliminated unknown
         self._elim_unknown()
+
+    def _hdiv_reconstruct(self):
+        """Reconstructs the broken HDiv solution into an
+        HDiv-conforming function. This is performed using an
+        averaging operator rather than the standard Galerkin
+        projection.
+        """
+        from firedrake.projection import reconstruct
+        reconstruct(self.broken_solution.split()[self.vidx],
+                    self.unbroken_solution.split()[self.vidx])
 
     @timed_function("HybridUpdate")
     def update(self, pc):
@@ -335,10 +350,13 @@ class HybridizationPC(PCBase):
             broken_pressure.dat.copy(unbroken_pressure.dat)
 
             # Compute the hdiv projection of the broken hdiv solution
-            self._assemble_projection_rhs()
-            with self._projection_rhs.dat.vec_ro as b_proj:
-                with self.unbroken_solution.split()[self.vidx].dat.vec as sol:
-                    self.hdiv_projection_ksp.solve(b_proj, sol)
+            if self.recon_flag:
+                self._hdiv_reconstruct()
+            else:
+                self._assemble_projection_rhs()
+                with self._projection_rhs.dat.vec_ro as b_proj:
+                    with self.unbroken_solution.split()[self.vidx].dat.vec as sol:
+                        self.hdiv_projection_ksp.solve(b_proj, sol)
 
             with self.unbroken_solution.dat.vec_ro as v:
                 v.copy(y)
@@ -362,10 +380,14 @@ class HybridizationPC(PCBase):
         viewer.popASCIITab()
         viewer.printfASCII("Locally reconstructing the broken solutions from the multipliers.\n")
         viewer.pushASCIITab()
-        viewer.printfASCII("Project the broken hdiv solution into the HDiv space.\n")
-        viewer.printfASCII("KSP for the HDiv projection stage:\n")
-        viewer.pushASCIITab()
-        self.hdiv_projection_ksp.view(viewer)
+
+        if self.recon_flag:
+            viewer.printfASCII("Reconstructing HDiv solution.\n")
+        else:
+            viewer.printfASCII("Project the broken HDiv solution into the HDiv space.\n")
+            viewer.printfASCII("KSP for the HDiv projection stage:\n")
+            viewer.pushASCIITab()
+            self.hdiv_projection_ksp.view(viewer)
         viewer.popASCIITab()
 
 
