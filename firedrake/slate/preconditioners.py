@@ -45,6 +45,7 @@ class HybridizationPC(PCBase):
         prefix = pc.getOptionsPrefix() + "hybridization_"
         _, P = pc.getOperators()
         self.cxt = P.getPythonContext()
+        appctx = self.cxt.appctx
 
         if not isinstance(self.cxt, ImplicitMatrixContext):
             raise ValueError("The python context must be an ImplicitMatrixContext")
@@ -104,8 +105,18 @@ class HybridizationPC(PCBase):
         p = TrialFunction(V[self.vidx])
         q = TestFunction(V[self.vidx])
         mass = ufl.dot(p, q)*ufl.dx
+
         # TODO: Bcs?
-        M = assemble(mass, bcs=None, form_compiler_parameters=self.cxt.fc_params)
+        # If boundary conditions are contained in the ImplicitMatrixContext:
+        if self.cxt.row_bcs:
+            assert len(self.cxt.row_bcs) == 1, (
+                "Only one strong condition is implemented at the moment."
+            )
+            bc, = self.cxt.row_bcs
+        else:
+            bc = None
+
+        M = assemble(mass, bcs=bc, form_compiler_parameters=self.cxt.fc_params)
         M.force_evaluation()
         Mmat = M.petscmat
 
@@ -136,25 +147,34 @@ class HybridizationPC(PCBase):
 
         # We zero out the contribution of the trace variables on the exterior
         # boundary. Extruded cells will have both horizontal and vertical
-        # facets
+        # facets. The trace variables are not zero where strong boundary
+        # conditions are present.
+        trace_markers = appctx.get("trace_bc_markers", "on_boundary")
         if mesh.cell_set._extruded:
-            trace_bcs = [DirichletBC(TraceSpace, Constant(0.0), "on_boundary"),
-                         DirichletBC(TraceSpace, Constant(0.0), "bottom"),
-                         DirichletBC(TraceSpace, Constant(0.0), "top")]
-            K = Tensor(gammar('+') * ufl.dot(sigma, n) * ufl.dS_h +
-                       gammar('+') * ufl.dot(sigma, n) * ufl.dS_v)
+            if trace_markers == "on_boundary":
+                trace_bcs = [DirichletBC(TraceSpace, Constant(0.0), "on_boundary"),
+                             DirichletBC(TraceSpace, Constant(0.0), "bottom"),
+                             DirichletBC(TraceSpace, Constant(0.0), "top")]
+            else:
+                trace_bcs = [DirichletBC(TraceSpace, Constant(0.0), m)
+                             for m in trace_markers]
+            dS_h = ufl.dS_h + ufl.dS_v
+            ds_h = ufl.ds_tb + ufl.ds_v
         else:
-            trace_bcs = [DirichletBC(TraceSpace, Constant(0.0), "on_boundary")]
-            K = Tensor(gammar('+') * ufl.dot(sigma, n) * ufl.dS)
+            trace_bcs = [DirichletBC(TraceSpace, Constant(0.0), trace_markers)]
+            dS_h = ufl.dS
+            ds_h = ufl.ds
 
-        # If boundary conditions are contained in the ImplicitMatrixContext:
-        if self.cxt.row_bcs:
-            raise NotImplementedError("Strong BCs not currently handled. Try imposing them weakly.")
+        K = Tensor(gammar('+') * ufl.dot(sigma, n) * dS_h)
+        schur_rhs_vec = K * Atilde.inv * self.broken_residual
+        for bc in self.cxt.row_bcs:
+            g = bc.function_arg
+            schur_rhs_vec -= Tensor(gammar('+') * ufl.dot(g, n) * ds_h)
 
         # Assemble the Schur complement operator and right-hand side
         self.schur_rhs = Function(TraceSpace)
         self._assemble_Srhs = create_assembly_callable(
-            K * Atilde.inv * self.broken_residual,
+            schur_rhs_vec,
             tensor=self.schur_rhs,
             form_compiler_parameters=self.cxt.fc_params)
 
@@ -268,7 +288,7 @@ class HybridizationPC(PCBase):
         initialized at this point.
         """
         # We assemble the unknown which is an expression
-        # of the first eliminated variable.
+        # of the eliminated velocity term.
         self._sub_unknown()
         # Recover the eliminated unknown
         self._elim_unknown()
