@@ -46,6 +46,9 @@ class HybridizationPC(PCBase):
         _, P = pc.getOperators()
         self.cxt = P.getPythonContext()
 
+        # Gather entire set of PETSc options
+        opts = PETSc.Options()
+
         if not isinstance(self.cxt, ImplicitMatrixContext):
             raise ValueError("The python context must be an ImplicitMatrixContext")
 
@@ -96,9 +99,28 @@ class HybridizationPC(PCBase):
         self.unbroken_solution = Function(V)
         self.unbroken_residual = Function(V)
 
+        residual_prefix = prefix + 'hdiv_residual_'
+        projection_prefix = prefix + 'hdiv_projection_'
+
+        # Default options if not specified
+        default_hdiv_mass_opts = {'ksp_type': 'cg',
+                                  'ksp_rtol': 1e-14}
+        for option in default_hdiv_mass_opts:
+            if not opts.hasName(residual_prefix + option):
+                opts.setValue(residual_prefix + option,
+                              default_hdiv_mass_opts[option])
+
+            if not opts.hasName(projection_prefix + option):
+                opts.setValue(projection_prefix + option,
+                              default_hdiv_mass_opts[option])
+
         # Set up the KSP for the hdiv residual projection
         hdiv_mass_ksp = PETSc.KSP().create(comm=pc.comm)
-        hdiv_mass_ksp.setOptionsPrefix(prefix + "hdiv_residual_")
+        hdiv_mass_ksp.setOptionsPrefix(residual_prefix)
+
+        # Set up the projection KSP
+        hdiv_projection_ksp = PETSc.KSP().create(comm=pc.comm)
+        hdiv_projection_ksp.setOptionsPrefix(projection_prefix)
 
         # HDiv mass operator
         p = TrialFunction(V[self.vidx])
@@ -113,6 +135,12 @@ class HybridizationPC(PCBase):
         hdiv_mass_ksp.setUp()
         hdiv_mass_ksp.setFromOptions()
         self.hdiv_mass_ksp = hdiv_mass_ksp
+
+        # Reuse the mass operator from the hdiv_mass_ksp
+        hdiv_projection_ksp.setOperators(Mmat)
+        hdiv_projection_ksp.setUp()
+        hdiv_projection_ksp.setFromOptions()
+        self.hdiv_projection_ksp = hdiv_projection_ksp
 
         # Storing the result of A.inv * r, where A is the HDiv
         # mass matrix and r is the HDiv residual
@@ -191,30 +219,12 @@ class HybridizationPC(PCBase):
         # Generate reconstruction calls
         self._reconstruction_calls(split_mixed_op, split_trace_op)
 
-        # NOTE: The projection stage *might* be replaced by a Fortin
-        # operator. We may want to allow the user to specify if they
-        # wish to use a Fortin operator over a projection, or vice-versa.
-        # In a future add-on, we can add a switch which chooses either
-        # the Fortin reconstruction or the usual KSP projection.
-
-        # Set up the projection KSP
-        hdiv_projection_ksp = PETSc.KSP().create(comm=pc.comm)
-        hdiv_projection_ksp.setOptionsPrefix(prefix + 'hdiv_projection_')
-
-        # Reuse the mass operator from the hdiv_mass_ksp
-        hdiv_projection_ksp.setOperators(Mmat)
-
         # Construct the RHS for the projection stage
         self._projection_rhs = Function(V[self.vidx])
         self._assemble_projection_rhs = create_assembly_callable(
             ufl.dot(self.broken_solution.split()[self.vidx], q)*ufl.dx,
             tensor=self._projection_rhs,
             form_compiler_parameters=self.cxt.fc_params)
-
-        # Finalize ksp setup
-        hdiv_projection_ksp.setUp()
-        hdiv_projection_ksp.setFromOptions()
-        self.hdiv_projection_ksp = hdiv_projection_ksp
 
     def _reconstruction_calls(self, split_mixed_op, split_trace_op):
         """This generates the reconstruction calls for the unknowns using the
