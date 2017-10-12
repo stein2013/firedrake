@@ -1,6 +1,3 @@
-"""This module provides custom python preconditioners utilizing
-the Slate language.
-"""
 import ufl
 
 from firedrake.logging import log, WARNING
