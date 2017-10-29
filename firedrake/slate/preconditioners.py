@@ -10,7 +10,157 @@ from firedrake.slate.slate import Tensor, AssembledVector
 from pyop2.profiling import timed_region, timed_function
 
 
-__all__ = ['HybridizationPC']
+__all__ = ['HybridizationPC', 'HybridStaticCondensationPC']
+
+
+# TODO: Better name?
+class HybridStaticCondensationPC(PCBase):
+    """
+    Expects a fully formulated hybridized formulation
+    written in "cell-local" form (no jumps or averages).
+    """
+
+    @timed_function("HybridSCInit")
+    def initialize(self, pc):
+        """
+        """
+        from firedrake.function import Function
+        from firedrake.assemble import (allocate_matrix,
+                                        create_assembly_callable)
+        from firedrake.formmanipulation import split_form
+
+        prefix = pc.getOptionsPrefix() + "hybrid_sc_"
+        _, P = pc.getOperators()
+        self.cxt = P.getPythonContext()
+        if not isinstance(self.cxt, ImplicitMatrixContext):
+            raise ValueError("Context must be an ImplicitMatrixContext")
+
+        # Retrieve the mixed function space, which is expected to
+        # be of the form: W = (DG_k)^n \times DG_k \times DG_trace
+        W = self.cxt.a.arguments()[0].function_space()
+        if len(W) != 3:
+            raise RuntimeError("Expecting three function spaces.")
+
+        # Assert a specific ordering of the spaces
+        # TODO: Clean this up
+        assert W[2].ufl_element().family() == "HDiv Trace"
+
+        # Extract trace space
+        T = W[2]
+
+        operators = dict(split_form(self.cxt.a))
+
+        # This operator is of the form:
+        # | A  B  C |
+        # | D  E  F |
+        # | G  H  J |
+        # NOTE: It is often the case that D = B.T,
+        # G = C.T, H = F.T, and J = 0, but we're not making
+        # that assumption here.
+        A = Tensor(operators[(0, 0)])
+        B = Tensor(operators[(0, 1)])
+        C = Tensor(operators[(0, 2)])
+        D = Tensor(operators[(1, 0)])
+        E = Tensor(operators[(1, 1)])
+        F = Tensor(operators[(1, 2)])
+        G = Tensor(operators[(2, 0)])
+        H = Tensor(operators[(2, 1)])
+        J = Tensor(operators[(2, 2)])
+
+        # Now we create the Schur complement expression
+        Sj = J - G * A.inv * C
+        Sh = H - G * A.inv * B
+        Se = E - D * A.inv * B
+        Sf = F - D * A.inv * C
+        S = Sj - Sh * Se.inv * Sf
+        self.S = allocate_matrix(S,
+                                 bcs=self.cxt.row_bcs,
+                                 form_compiler_parameters=self.cxt.fc_params)
+        self._assemble_S = create_assembly_callable(
+            S,
+            tensor=self.S,
+            bcs=self.cxt.row_bcs,
+            form_compiler_parameters=self.cxt.fc_params)
+
+        self._assemble_S()
+        self.S.force_evaluation()
+        Smat = self.S.petscmat
+
+        # Set up ksp for the trace problem
+        trace_ksp = PETSc.KSP().create(comm=pc.comm)
+        trace_ksp.setOptionsPrefix(prefix)
+        trace_ksp.setOperators(Smat)
+        trace_ksp.setUp()
+        trace_ksp.setFromOptions()
+        self.trace_ksp = trace_ksp
+
+        # Expression for RHS assembly
+        # Set up the functions for trace solution and
+        # the residual for the trace system
+        self.r_lambda = Function(T)
+        self.residual = Function(W)
+        v1, v2, v3 = self.residual.split()
+        glob = Sh * Se.inv * D * A.inv - G * A.inv
+        R_lambda = v3 + glob * v1 - Sh * Se.inv * v2
+        self._assemble_Srhs = create_assembly_callable(
+            R_lambda,
+            tensor=self.r_lambda,
+            form_compiler_parameters=self.cxt.fc_params)
+
+        self.solution = Function(W)
+        q_h, u_h, lambda_h = self.solution.split()
+
+        # Assemble u_h using lambda_h
+        self._assemble_u = create_assembly_callable(
+            Se.inv * (v2 - D * A.inv * v1 - Sf * lambda_h),
+            tensor=u_h,
+            form_compiler_parameters=self.cxt.fc_params)
+
+        # Recover q_h using both u_h and lambda_h
+        self._assemble_q = create_assembly_callable(
+            A.inv * (v1 - B * u_h - C * lambda_h),
+            tensor=q_h,
+            form_compiler_parameters=self.cxt.fc_params)
+
+    @timed_function("HybridSCUpdate")
+    def update(self, pc):
+        """
+        """
+        self._assemble_S()
+        self.S.force_evaluation()
+
+    def apply(self, pc, x, y):
+        """
+        """
+        with self.residual.dat.vec_wo as v:
+            x.copy(v)
+
+        with timed_region("HybridSCRHS"):
+            # Now assemble residual for the reduced problem
+            self._assemble_Srhs()
+
+        with timed_region("HybridSCSolve"):
+            # Solve the system for the Lagrange multipliers
+            with self.r_lambda.dat.vec_ro as b:
+                if self.trace_ksp.getInitialGuessNonzero():
+                    acc = self.solution.split()[2].dat.vec
+                else:
+                    acc = self.solution.split()[2].dat.vec_wo
+                with acc as x_trace:
+                    self.trace_ksp.solve(b, x_trace)
+
+        with timed_region("HybridSCReconstruct"):
+            # Recover u_h and q_h
+            self._assemble_u()
+            self._assemble_q()
+
+        with self.solution.dat.vec_ro as w:
+            w.copy(y)
+
+    def applyTranspose(self, pc, x, y):
+        """
+        """
+        raise NotImplementedError("Transpose application is not implemented.")
 
 
 class HybridizationPC(PCBase):
