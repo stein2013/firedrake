@@ -289,11 +289,11 @@ class HybridizationPC(PCBase):
             trace_bcs = [DirichletBC(TraceSpace, Constant(0.0), "on_boundary"),
                          DirichletBC(TraceSpace, Constant(0.0), "bottom"),
                          DirichletBC(TraceSpace, Constant(0.0), "top")]
-            K = Tensor(gammar('+') * ufl.dot(sigma, n) * ufl.dS_h +
-                       gammar('+') * ufl.dot(sigma, n) * ufl.dS_v)
+            K = Tensor(gammar('+') * ufl.jump(sigma, n=n) * ufl.dS_h +
+                       gammar('+') * ufl.jump(sigma, n=n) * ufl.dS_v)
         else:
             trace_bcs = [DirichletBC(TraceSpace, Constant(0.0), "on_boundary")]
-            K = Tensor(gammar('+') * ufl.dot(sigma, n) * ufl.dS)
+            K = Tensor(gammar('+') * ufl.jump(sigma, n=n) * ufl.dS)
 
         # If boundary conditions are contained in the ImplicitMatrixContext:
         if self.cxt.row_bcs:
