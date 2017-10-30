@@ -25,6 +25,7 @@ from itertools import chain
 
 from ufl.algorithms.map_integrands import map_integrand_dags
 from ufl.algorithms.multifunction import MultiFunction
+from ufl.classes import Zero
 from ufl.domain import join_domains
 from ufl.form import Form
 
@@ -34,14 +35,15 @@ __all__ = ['AssembledVector', 'Tensor',
            'Add', 'Mul']
 
 
-class CheckRestrictions(MultiFunction):
-    """UFL MultiFunction for enforcing cell-wise integrals to contain
-    only positive (outward) restrictions.
+class RemoveNegativeRestrictions(MultiFunction):
+    """
     """
     expr = MultiFunction.reuse_if_untouched
 
-    def negative_restrictions(self, o):
-        raise ValueError("Must contain only positive restrictions!")
+    def negative_restricted(self, o):
+        return Zero(o.ufl_shape,
+                    o.ufl_free_indices,
+                    o.ufl_index_dimensions)
 
 
 class TensorBase(object, metaclass=ABCMeta):
@@ -332,15 +334,12 @@ class Tensor(TensorBase):
         if r not in (0, 1, 2):
             raise NotImplementedError("No support for tensors of rank %d." % r)
 
-        # Checks for positive restrictions on integrals
-        integrals = form.integrals()
-        mapper = CheckRestrictions()
-        for it in integrals:
-            map_integrand_dags(mapper, it)
+        # Removes any negative restrictions via zero-filling
+        _form = map_integrand_dags(RemoveNegativeRestrictions(), form)
 
         super(Tensor, self).__init__()
 
-        self.form = form
+        self.form = _form
 
     def arg_function_spaces(self):
         """Returns a tuple of function spaces that the tensor
