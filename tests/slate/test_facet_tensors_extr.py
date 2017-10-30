@@ -9,30 +9,60 @@ def mesh(request):
     return ExtrudedMesh(m, layers=4, layer_height=0.25)
 
 
-def test_horiz_facet_interior(mesh):
+def test_horiz_facet_interior_jump(mesh):
     DG = VectorFunctionSpace(mesh, "DG", 1)
     n = FacetNormal(mesh)
     u = TestFunction(DG)
 
     x, y, z = SpatialCoordinate(mesh)
     f = project(as_vector([z, y, x]), DG)
+    form = jump(f[2]*f[1]*u, n=n)*dS_h
 
-    A = assemble(Tensor(dot(f[2]*f[1]*u, n)*dS_h)).dat.data
-    ref = assemble(jump(f[2]*f[1]*u, n=n)*dS_h).dat.data
+    A = assemble(Tensor(form)).dat.data
+    ref = assemble(form).dat.data
 
     assert np.allclose(A, ref, rtol=1e-8)
 
 
-def test_vert_facet_interior(mesh):
+def test_horiz_facet_interior_avg(mesh):
+    DG = FunctionSpace(mesh, "DG", 1)
+    u = TestFunction(DG)
+
+    x, y, z = SpatialCoordinate(mesh)
+    f = interpolate(x + 2*y + 4*z, DG)
+    form = avg(f * u)*dS_h
+
+    A = assemble(Tensor(form)).dat.data
+    ref = assemble(form).dat.data
+
+    assert np.allclose(A, ref, rtol=1e-8)
+
+
+def test_vert_facet_interior_jump(mesh):
     DG = VectorFunctionSpace(mesh, "DG", 1)
     n = FacetNormal(mesh)
     u = TestFunction(DG)
 
     x, y, z = SpatialCoordinate(mesh)
     f = project(as_vector([z, y, x]), DG)
+    form = jump(f[0]*u, n=n)*dS_v
 
-    A = assemble(Tensor(dot(f[0]*u, n)*dS_v)).dat.data
-    ref = assemble(jump(f[0]*u, n=n)*dS_v).dat.data
+    A = assemble(Tensor(form)).dat.data
+    ref = assemble(form).dat.data
+
+    assert np.allclose(A, ref, rtol=1e-8)
+
+
+def test_vert_facet_interior_avg(mesh):
+    DG = FunctionSpace(mesh, "DG", 1)
+    u = TestFunction(DG)
+
+    x, y, z = SpatialCoordinate(mesh)
+    f = interpolate(x + 2*y + 4*z, DG)
+    form = avg(f * u)*dS_v
+
+    A = assemble(Tensor(form)).dat.data
+    ref = assemble(form).dat.data
 
     assert np.allclose(A, ref, rtol=1e-8)
 
@@ -82,6 +112,20 @@ def test_vert_facet_exterior(mesh):
     assert np.allclose(A, ref, rtol=1e-8)
 
 
+def test_total_interior_avg(mesh):
+    DG = FunctionSpace(mesh, "DG", 1)
+    u = TestFunction(DG)
+
+    x, y, z = SpatialCoordinate(mesh)
+    f = interpolate(x + 2*y + 4*z, DG)
+    form = avg(f * u)*(dS_h + dS_v)
+
+    A = assemble(Tensor(form)).dat.data
+    ref = assemble(form).dat.data
+
+    assert np.allclose(A, ref, rtol=1e-8)
+
+
 def test_total_facet(mesh):
     DG = VectorFunctionSpace(mesh, "DG", 1)
     n = FacetNormal(mesh)
@@ -92,11 +136,10 @@ def test_total_facet(mesh):
 
     top = dot(f[0]*f[1]*u, n)*ds_t
     bottom = dot(f[2]*f[1]*u, n)*ds_b
-    horiz = dot(f[0]*u, n)*dS_h
-    vert = dot(f[2]*u, n)*dS_v
-    A = assemble(Tensor(top + bottom + horiz + vert)).dat.data
-    ref_form = top + bottom + jump(f[2]*u, n=n)*dS_v + jump(f[0]*u, n=n)*dS_h
-    ref = assemble(ref_form).dat.data
+    form = top + bottom + jump(f[2]*u, n=n)*dS_v + jump(f[0]*u, n=n)*dS_h
+
+    A = assemble(Tensor(form)).dat.data
+    ref = assemble(form).dat.data
 
     assert np.allclose(A, ref, rtol=1e-8)
 
