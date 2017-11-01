@@ -27,7 +27,8 @@ class HybridStaticCondensationPC(PCBase):
         from firedrake.function import Function
         from firedrake.assemble import (allocate_matrix,
                                         create_assembly_callable)
-        from firedrake.formmanipulation import split_form
+        from firedrake.formmanipulation import ExtractSubBlock
+        from pyop2.base import MixedDat
 
         prefix = pc.getOptionsPrefix() + "hybrid_sc_"
         _, P = pc.getOperators()
@@ -48,31 +49,41 @@ class HybridStaticCondensationPC(PCBase):
         # Extract trace space
         T = W[2]
 
-        operators = dict(split_form(self.cxt.a))
-
-        # This operator is of the form:
+        # This operator has the form:
         # | A  B  C |
         # | D  E  F |
         # | G  H  J |
         # NOTE: It is often the case that D = B.T,
         # G = C.T, H = F.T, and J = 0, but we're not making
         # that assumption here.
-        A = Tensor(operators[(0, 0)])
-        B = Tensor(operators[(0, 1)])
-        C = Tensor(operators[(0, 2)])
-        D = Tensor(operators[(1, 0)])
-        E = Tensor(operators[(1, 1)])
-        F = Tensor(operators[(1, 2)])
-        G = Tensor(operators[(2, 0)])
-        H = Tensor(operators[(2, 1)])
-        J = Tensor(operators[(2, 2)])
+        splitter = ExtractSubBlock()
 
-        # Now we create the Schur complement expression
-        Sj = J - G * A.inv * C
-        Sh = H - G * A.inv * B
-        Se = E - D * A.inv * B
-        Sf = F - D * A.inv * C
-        S = Sj - Sh * Se.inv * Sf
+        # Extract sub-block:
+        # | A B |
+        # | D E |
+        # which has block row indices (0, 1) and block
+        # column indices (0, 1) as well.
+        M = Tensor(splitter.split(self.cxt.a, ((0, 1), (0, 1))))
+
+        # Extract sub-block:
+        # | C |
+        # | F |
+        # which has block row indices (0, 1) and block
+        # column indices (2,)
+        K = Tensor(splitter.split(self.cxt.a, ((0, 1), (2,))))
+
+        # Extract sub-block:
+        # | G H |
+        # which has block row indices (2,) and block column
+        # indices (0, 1)
+        L = Tensor(splitter.split(self.cxt.a, ((2,), (0, 1))))
+
+        # And the final block J has block row-column
+        # indices (2, 2)
+        J = Tensor(splitter.split(self.cxt.a, (2, 2)))
+
+        # Schur complement for traces
+        S = J - L * M.inv * K
         self.S = allocate_matrix(S,
                                  bcs=self.cxt.row_bcs,
                                  form_compiler_parameters=self.cxt.fc_params)
@@ -94,14 +105,31 @@ class HybridStaticCondensationPC(PCBase):
         trace_ksp.setFromOptions()
         self.trace_ksp = trace_ksp
 
+        # Local tensors needed for reconstruction
+        # (extracted by row-column indices
+        A = Tensor(splitter.split(self.cxt.a, (0, 0)))
+        B = Tensor(splitter.split(self.cxt.a, (0, 1)))
+        C = Tensor(splitter.split(self.cxt.a, (0, 2)))
+        D = Tensor(splitter.split(self.cxt.a, (1, 0)))
+        E = Tensor(splitter.split(self.cxt.a, (1, 1)))
+        F = Tensor(splitter.split(self.cxt.a, (1, 2)))
+        Se = E - D * A.inv * B
+        Sf = F - D * A.inv * C
+
         # Expression for RHS assembly
         # Set up the functions for trace solution and
         # the residual for the trace system
         self.r_lambda = Function(T)
         self.residual = Function(W)
         v1, v2, v3 = self.residual.split()
-        glob = Sh * Se.inv * D * A.inv - G * A.inv
-        R_lambda = v3 + glob * v1 - Sh * Se.inv * v2
+
+        # Create mixed function for residual computation.
+        # This creates the RHS for the trace problem:
+        # v3 - L * M.inv * | v1 v2 |^T
+        VV = W[0] * W[1]
+        mdat = MixedDat([v1.dat, v2.dat])
+        v1v2 = Function(VV, val=mdat.data)
+        R_lambda = AssembledVector(v3) - L * M.inv * AssembledVector(v1v2)
         self._assemble_Srhs = create_assembly_callable(
             R_lambda,
             tensor=self.r_lambda,
@@ -112,13 +140,17 @@ class HybridStaticCondensationPC(PCBase):
 
         # Assemble u_h using lambda_h
         self._assemble_u = create_assembly_callable(
-            Se.inv * (v2 - D * A.inv * v1 - Sf * lambda_h),
+            Se.inv * (AssembledVector(v2) -
+                      D * A.inv * AssembledVector(v1) -
+                      Sf * AssembledVector(lambda_h)),
             tensor=u_h,
             form_compiler_parameters=self.cxt.fc_params)
 
         # Recover q_h using both u_h and lambda_h
         self._assemble_q = create_assembly_callable(
-            A.inv * (v1 - B * u_h - C * lambda_h),
+            A.inv * (AssembledVector(v1) -
+                     B * AssembledVector(u_h) -
+                     C * AssembledVector(lambda_h)),
             tensor=q_h,
             form_compiler_parameters=self.cxt.fc_params)
 
