@@ -24,10 +24,13 @@ class HybridStaticCondensationPC(PCBase):
     def initialize(self, pc):
         """
         """
-        from firedrake.function import Function
         from firedrake.assemble import (allocate_matrix,
                                         create_assembly_callable)
+        from firedrake.bcs import DirichletBC
         from firedrake.formmanipulation import ExtractSubBlock
+        from firedrake.function import Function
+        from firedrake.functionspace import FunctionSpace
+        from firedrake.interpolation import interpolate
         from pyop2.base import MixedDat
 
         prefix = pc.getOptionsPrefix() + "hybrid_sc_"
@@ -45,9 +48,6 @@ class HybridStaticCondensationPC(PCBase):
         # Assert a specific ordering of the spaces
         # TODO: Clean this up
         assert W[2].ufl_element().family() == "HDiv Trace"
-
-        # Extract trace space
-        T = W[2]
 
         # This operator has the form:
         # | A  B  C |
@@ -84,13 +84,29 @@ class HybridStaticCondensationPC(PCBase):
 
         # Schur complement for traces
         S = J - L * M.inv * K
+
+        # Extract trace space
+        T = W[2]
+
+        # Need to duplicate a trace space which is NOT
+        # associated with a subspace of a mixed space.
+        Tr = FunctionSpace(T.mesh(), T.ufl_element())
+        bcs = []
+        for bc in self.cxt.row_bcs:
+            if isinstance(bc.function_arg, Function):
+                bc_arg = interpolate(bc.function_arg, Tr)
+            else:
+                # Constants don't need to be interpolated
+                bc_arg = bc.function_arg
+            bcs.append(DirichletBC(Tr, bc_arg, bc.sub_domain))
+
         self.S = allocate_matrix(S,
-                                 bcs=self.cxt.row_bcs,
+                                 bcs=bcs,
                                  form_compiler_parameters=self.cxt.fc_params)
         self._assemble_S = create_assembly_callable(
             S,
             tensor=self.S,
-            bcs=self.cxt.row_bcs,
+            bcs=bcs,
             form_compiler_parameters=self.cxt.fc_params)
 
         self._assemble_S()
@@ -121,18 +137,20 @@ class HybridStaticCondensationPC(PCBase):
         # the residual for the trace system
         self.r_lambda = Function(T)
         self.residual = Function(W)
+        self.r_lambda_thunk = Function(T)
         v1, v2, v3 = self.residual.split()
 
         # Create mixed function for residual computation.
-        # This creates the RHS for the trace problem:
-        # v3 - L * M.inv * | v1 v2 |^T
+        # This projects the non-trace residual bits into
+        # the trace space:
+        # -L * M.inv * | v1 v2 |^T
         VV = W[0] * W[1]
         mdat = MixedDat([v1.dat, v2.dat])
         v1v2 = Function(VV, val=mdat.data)
-        R_lambda = AssembledVector(v3) - L * M.inv * AssembledVector(v1v2)
-        self._assemble_Srhs = create_assembly_callable(
-            R_lambda,
-            tensor=self.r_lambda,
+        r_lambda_thunk = -L * M.inv * AssembledVector(v1v2)
+        self._assemble_Srhs_thunk = create_assembly_callable(
+            r_lambda_thunk,
+            tensor=self.r_lambda_thunk,
             form_compiler_parameters=self.cxt.fc_params)
 
         self.solution = Function(W)
@@ -169,7 +187,11 @@ class HybridStaticCondensationPC(PCBase):
 
         with timed_region("HybridSCRHS"):
             # Now assemble residual for the reduced problem
-            self._assemble_Srhs()
+            self._assemble_Srhs_thunk()
+
+            # Generate the trace RHS residual
+            self.r_lambda.assign(self.residual.split()[2] +
+                                 self.r_lambda_thunk)
 
         with timed_region("HybridSCSolve"):
             # Solve the system for the Lagrange multipliers
