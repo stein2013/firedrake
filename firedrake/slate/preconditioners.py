@@ -3,6 +3,7 @@ the Slate language.
 """
 import ufl
 
+from firedrake.logging import log, WARNING
 from firedrake.matrix_free.preconditioners import PCBase
 from firedrake.matrix_free.operators import ImplicitMatrixContext
 from firedrake.petsc import PETSc
@@ -92,7 +93,14 @@ class HybridStaticCondensationPC(PCBase):
         # associated with a subspace of a mixed space.
         Tr = FunctionSpace(T.mesh(), T.ufl_element())
         bcs = []
-        for bc in self.cxt.row_bcs:
+        cxt_bcs = self.cxt.row_bcs
+        if cxt_bcs:
+            bc_msg = "It is highly recommended to apply BCs weakly."
+            log(WARNING, bc_msg)
+        for bc in cxt_bcs:
+            assert bc.function_space() == T, (
+                "BCs should be imposing vanishing conditions on traces"
+            )
             if isinstance(bc.function_arg, Function):
                 bc_arg = interpolate(bc.function_arg, Tr)
             else:
@@ -249,7 +257,7 @@ class HybridizationPC(PCBase):
         self.cxt = P.getPythonContext()
 
         if not isinstance(self.cxt, ImplicitMatrixContext):
-            raise ValueError("The python context must be an ImplicitMatrixContext")
+            raise ValueError("Context must be an ImplicitMatrixContext")
 
         test, trial = self.cxt.a.arguments()
 
@@ -274,21 +282,19 @@ class HybridizationPC(PCBase):
         W = V[self.vidx]
         if W.ufl_element().family() == "Brezzi-Douglas-Marini":
             tdegree = W.ufl_element().degree()
-
         else:
             try:
                 # If we have a tensor product element
                 h_deg, v_deg = W.ufl_element().degree()
                 tdegree = (h_deg - 1, v_deg - 1)
-
             except TypeError:
                 tdegree = W.ufl_element().degree() - 1
 
         TraceSpace = FunctionSpace(mesh, "HDiv Trace", tdegree)
 
         # Break the function spaces and define fully discontinuous spaces
-        broken_elements = ufl.MixedElement([ufl.BrokenElement(Vi.ufl_element()) for Vi in V])
-        V_d = FunctionSpace(mesh, broken_elements)
+        broken_elements = [ufl.BrokenElement(Vi.ufl_element()) for Vi in V]
+        V_d = FunctionSpace(mesh, ufl.MixedElement(broken_elements))
 
         # Set up the functions for the original, hybridized
         # and schur complement systems
@@ -306,8 +312,7 @@ class HybridizationPC(PCBase):
         p = TrialFunction(V[self.vidx])
         q = TestFunction(V[self.vidx])
         mass = ufl.dot(p, q)*ufl.dx
-        # TODO: Bcs?
-        M = assemble(mass, bcs=None, form_compiler_parameters=self.cxt.fc_params)
+        M = assemble(mass, form_compiler_parameters=self.cxt.fc_params)
         M.force_evaluation()
         Mmat = M.petscmat
 
@@ -351,7 +356,8 @@ class HybridizationPC(PCBase):
 
         # If boundary conditions are contained in the ImplicitMatrixContext:
         if self.cxt.row_bcs:
-            raise NotImplementedError("Strong BCs not currently handled. Try imposing them weakly.")
+            bc_msg = "Boundary conditions should be applied weakly."
+            log(WARNING, bc_msg)
 
         # Assemble the Schur complement operator and right-hand side
         self.schur_rhs = Function(TraceSpace)
@@ -550,7 +556,7 @@ class HybridizationPC(PCBase):
 
     def applyTranspose(self, pc, x, y):
         """Apply the transpose of the preconditioner."""
-        raise NotImplementedError("The transpose application of the PC is not implemented.")
+        raise NotImplementedError("The transpose application is not implemented.")
 
     def view(self, pc, viewer=None):
         """Viewer calls for the various configurable objects in this PC."""
