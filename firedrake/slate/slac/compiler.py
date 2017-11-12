@@ -124,7 +124,7 @@ def generate_kernel_ast(builder, statements, declared_temps, slac_parameters):
                          declared temporaries.
     :arg slac_parameters: A `dict` of parameters to modify the
                           Slate kernel. For example, the
-                          'split_field' argument permits the
+                          'split_vector' argument permits the
                           local assembly of mixed vectors but
                           only returns a particular field, denoted
                           as an integer.
@@ -138,13 +138,15 @@ def generate_kernel_ast(builder, statements, declared_temps, slac_parameters):
     else:
         shape = slate_expr.shape
 
-    if slac_parameters.get("split_vector") is not None:
-        split = True
-        field_id = slac_parameters["split_vector"]
+    split_idx = slac_parameters.get("split_vector")
+
+    if split_idx is not None:
         assert slate_expr.rank == 1, "Can only split vectors"
-        shape = (slate_expr.shapes[0][field_id],)
-    else:
-        split = False
+
+        # Modify the shape of out-tensor
+        # (vectors only have one shape tuple at key '0')
+        field_shape = slate_expr.shapes[0]
+        shape = (field_shape[split_idx],)
 
     # Now we create the result statement by declaring its eigen type and
     # using Eigen::Map to move between Eigen and C data structs.
@@ -166,11 +168,12 @@ def generate_kernel_ast(builder, statements, declared_temps, slac_parameters):
     statements.append(ast.FlatBlock("/* Linear algebra expression */\n"))
     cpp_string = metaphrase_slate_to_cpp(slate_expr, declared_temps)
 
-    if split:
-        # TODO: Make this more general. This assumes one only wants
-        # the first 'n' elements. (i.e. only field '0')
+    if split_idx is not None:
+        # Return a fixed-sized segment of the mixed-vector of
+        # length "field_shape" and starting index "split_idx"
         n, = shape
-        cpp_string = '(' + cpp_string + ').head(%d)' % n
+        cpp_string = '(' + cpp_string + ').segment<%d>(%d)' % (n, split_idx)
+
     statements.append(ast.Incr(result_sym, ast.FlatBlock(cpp_string)))
 
     # Generate arguments for the macro kernel
