@@ -257,7 +257,6 @@ def auxiliary_temporaries(builder, declared_temps):
             result = slate_to_cpp(exp, declared_temps)
             tensor_type = eigen_matrixbase_type(shape=exp.shape)
             statements.append(ast.Decl(tensor_type, t))
-            statements.append(ast.FlatBlock("%s.setZero();\n" % t))
             results.append(ast.Assign(t, result))
             declared_temps[exp] = t
 
@@ -315,11 +314,10 @@ def coefficient_temporaries(builder, declared_temps):
             function = vector._function
 
             if vector not in declared_temps:
-                # Declare and initialize coefficient temporary
+                # Declare vector temporary
                 c_type = eigen_matrixbase_type(shape=c_shape)
                 t = ast.Symbol("VT%d" % len(declared_temps))
                 statements.append(ast.Decl(c_type, t))
-                statements.append(ast.FlatBlock("%s.setZero();\n" % t))
                 declared_temps[vector] = t
 
             # Assigning coefficient values into temporary
