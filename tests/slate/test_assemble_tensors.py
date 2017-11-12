@@ -159,6 +159,27 @@ def test_nested_coefficients_matrix(mesh):
     assert np.allclose(M.M.values, assemble(form).M.values, rtol=1e-14)
 
 
+def test_split_vector(mesh):
+    V = FunctionSpace(mesh, "DG", 4)
+    U = FunctionSpace(mesh, "DG", 2)
+    W = V * U
+    q = Function(V).assign(10.0)
+    p = Function(U).assign(42.0)
+    u, phi = TrialFunctions(W)
+    v, psi = TestFunctions(W)
+
+    K = Tensor(inner(u, v)*dx + inner(phi, psi)*dx)
+    F = Tensor(inner(q, v)*dx + inner(p, psi)*dx)
+    foo = assemble(K.inv * F, slac_parameters={"split_vector": 0})
+    q_h, _ = foo.split()
+
+    bar = assemble(K.inv * F, slac_parameters={"split_vector": 1})
+    _, p_h = bar.split()
+
+    assert np.allclose(q_h.dat.data, q.dat.data, rtol=1e-14)
+    assert np.allclose(p_h.dat.data, p.dat.data, rtol=1e-14)
+
+
 @pytest.mark.xfail(raises=NotImplementedError)
 def test_mixed_argument_tensor(mesh):
     V = FunctionSpace(mesh, "CG", 1)
