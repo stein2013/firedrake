@@ -40,7 +40,7 @@ PETSC_DIR = get_petsc_dir()
 cell_to_facets_dtype = np.dtype(np.int8)
 
 
-def compile_expression(slate_expr, tsfc_parameters=None):
+def compile_expression(slate_expr, tsfc_parameters=None, slac_parameters=None):
     """Takes a Slate expression `slate_expr` and returns the appropriate
     :class:`firedrake.op2.Kernel` object representing the Slate expression.
 
@@ -54,9 +54,15 @@ def compile_expression(slate_expr, tsfc_parameters=None):
     if not isinstance(slate_expr, slate.TensorBase):
         raise ValueError("Expecting a `TensorBase` object, not %s" % type(slate_expr))
 
+    if slac_parameters:
+        slac_parameters = slac_parameters.copy()
+    else:
+        slac_parameters = {}
+
     # TODO: Get PyOP2 to write into mixed dats
     if slate_expr.is_mixed:
-        raise NotImplementedError("Compiling mixed slate expressions")
+        if slac_parameters.get("split_vector") is None:
+            raise NotImplementedError("Compiling mixed slate expression.")
 
     if len(slate_expr.ufl_domains()) > 1:
         raise NotImplementedError("Multiple domains not implemented.")
@@ -93,7 +99,10 @@ def compile_expression(slate_expr, tsfc_parameters=None):
         statements.extend(aux_temps)
 
     # Generate the kernel information with complete AST
-    kinfo = generate_kernel_ast(builder, statements, declared_temps)
+    kinfo = generate_kernel_ast(builder,
+                                statements,
+                                declared_temps,
+                                slac_parameters)
 
     # Cache the resulting kernel
     idx = tuple([0]*slate_expr.rank)
@@ -103,7 +112,7 @@ def compile_expression(slate_expr, tsfc_parameters=None):
     return kernel
 
 
-def generate_kernel_ast(builder, statements, declared_temps):
+def generate_kernel_ast(builder, statements, declared_temps, slac_parameters):
     """Glues together the complete AST for the Slate expression
     contained in the :class:`LocalKernelBuilder`.
 
@@ -113,6 +122,12 @@ def generate_kernel_ast(builder, statements, declared_temps):
                      assembly calls and temporary declarations.
     :arg declared_temps: A `dict` containing all previously
                          declared temporaries.
+    :arg slac_parameters: A `dict` of parameters to modify the
+                          Slate kernel. For example, the
+                          'split_field' argument permits the
+                          local assembly of mixed vectors but
+                          only returns a particular field, denoted
+                          as an integer.
 
     Return: A `KernelInfo` object describing the complete AST.
     """
@@ -123,6 +138,14 @@ def generate_kernel_ast(builder, statements, declared_temps):
     else:
         shape = slate_expr.shape
 
+    if slac_parameters.get("split_vector") is not None:
+        split = True
+        field_id = slac_parameters["split_vector"]
+        assert slate_expr.rank == 1, "Can only split vectors"
+        shape = (slate_expr.shapes[0][field_id],)
+    else:
+        split = False
+
     # Now we create the result statement by declaring its eigen type and
     # using Eigen::Map to move between Eigen and C data structs.
     statements.append(ast.FlatBlock("/* Map eigen tensor into C struct */\n"))
@@ -130,18 +153,25 @@ def generate_kernel_ast(builder, statements, declared_temps):
     result_data_sym = ast.Symbol("A%d" % len(declared_temps))
     result_type = "Eigen::Map<%s >" % eigen_matrixbase_type(shape)
     result = ast.Decl(SCALAR_TYPE, ast.Symbol(result_data_sym, shape))
+
     result_statement = ast.FlatBlock("%s %s((%s *)%s);\n" % (result_type,
                                                              result_sym,
                                                              SCALAR_TYPE,
                                                              result_data_sym))
+
     statements.append(result_statement)
 
     # Generate the complete c++ string performing the linear algebra operations
     # on Eigen matrices/vectors
     statements.append(ast.FlatBlock("/* Linear algebra expression */\n"))
-    cpp_string = ast.FlatBlock(metaphrase_slate_to_cpp(slate_expr,
-                                                       declared_temps))
-    statements.append(ast.Incr(result_sym, cpp_string))
+    cpp_string = metaphrase_slate_to_cpp(slate_expr, declared_temps)
+
+    if split:
+        # TODO: Make this more general. This assumes one only wants
+        # the first 'n' elements. (i.e. only field '0')
+        n, = shape
+        cpp_string = '(' + cpp_string + ').head(%d)' % n
+    statements.append(ast.Incr(result_sym, ast.FlatBlock(cpp_string)))
 
     # Generate arguments for the macro kernel
     args = [result, ast.Decl("%s **" % SCALAR_TYPE, builder.coord_sym)]
