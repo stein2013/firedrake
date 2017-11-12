@@ -59,10 +59,15 @@ def compile_expression(slate_expr, tsfc_parameters=None, slac_parameters=None):
     else:
         slac_parameters = {}
 
-    # TODO: Get PyOP2 to write into mixed dats
+    field_idx = slac_parameters.get("split_vector")
+
+    # TODO: Get PyOP2 to write into mixed dats/mats
     if slate_expr.is_mixed:
-        if slac_parameters.get("split_vector") is None:
+        if field_idx is None:
             raise NotImplementedError("Compiling mixed slate expression.")
+        else:
+            assert isinstance(field_idx, int), "Field index must be an integer"
+            assert slate_expr.rank == 1, "Can only split vectors"
 
     if len(slate_expr.ufl_domains()) > 1:
         raise NotImplementedError("Multiple domains not implemented.")
@@ -99,20 +104,17 @@ def compile_expression(slate_expr, tsfc_parameters=None, slac_parameters=None):
         statements.extend(aux_temps)
 
     # Generate the kernel information with complete AST
-    kinfo = generate_kernel_ast(builder,
-                                statements,
-                                declared_temps,
-                                slac_parameters)
+    kinfo = generate_kernel_ast(builder, statements, declared_temps, field_idx)
 
     # Cache the resulting kernel
-    idx = tuple([0]*slate_expr.rank)
+    idx = tuple([field_idx or 0]*slate_expr.rank)
     kernel = (SplitKernel(idx, kinfo),)
     slate_expr._metakernel_cache = kernel
 
     return kernel
 
 
-def generate_kernel_ast(builder, statements, declared_temps, slac_parameters):
+def generate_kernel_ast(builder, statements, declared_temps, field_idx):
     """Glues together the complete AST for the Slate expression
     contained in the :class:`LocalKernelBuilder`.
 
@@ -122,12 +124,8 @@ def generate_kernel_ast(builder, statements, declared_temps, slac_parameters):
                      assembly calls and temporary declarations.
     :arg declared_temps: A `dict` containing all previously
                          declared temporaries.
-    :arg slac_parameters: A `dict` of parameters to modify the
-                          Slate kernel. For example, the
-                          'split_vector' argument permits the
-                          local assembly of mixed vectors but
-                          only returns a particular field, denoted
-                          as an integer.
+    :arg field_idx: An optional integer indicating which field of
+                    a mixed vector to return.
 
     Return: A `KernelInfo` object describing the complete AST.
     """
@@ -138,15 +136,24 @@ def generate_kernel_ast(builder, statements, declared_temps, slac_parameters):
     else:
         shape = slate_expr.shape
 
-    split_idx = slac_parameters.get("split_vector")
-
-    if split_idx is not None:
-        assert slate_expr.rank == 1, "Can only split vectors"
-
+    if field_idx is not None:
         # Modify the shape of out-tensor
         # (vectors only have one shape tuple at key '0')
         field_shape = slate_expr.shapes[0]
-        shape = (field_shape[split_idx],)
+
+        # A problem with 'n' fields have indices (0, ..., n-1) and so
+        # the field_idx must be within that range
+        assert field_idx >= 0 and field_idx <= len(field_shape) - 1, (
+            "Field index %d is out of range!" % field_idx
+        )
+        shp = field_shape[field_idx]
+        shape = (shp,)
+
+        # Compute start_idx for accessing elements of local vector
+        start_idx = sum(i for i in field_shape[:field_idx])
+        split = lambda x: '(' + x + ').segment<%d>(%d)' % (shp, start_idx)
+    else:
+        split = lambda x: x
 
     # Now we create the result statement by declaring its eigen type and
     # using Eigen::Map to move between Eigen and C data structs.
@@ -167,14 +174,7 @@ def generate_kernel_ast(builder, statements, declared_temps, slac_parameters):
     # on Eigen matrices/vectors
     statements.append(ast.FlatBlock("/* Linear algebra expression */\n"))
     cpp_string = metaphrase_slate_to_cpp(slate_expr, declared_temps)
-
-    if split_idx is not None:
-        # Return a fixed-sized segment of the mixed-vector of
-        # length "field_shape" and starting index "split_idx"
-        n, = shape
-        cpp_string = '(' + cpp_string + ').segment<%d>(%d)' % (n, split_idx)
-
-    statements.append(ast.Incr(result_sym, ast.FlatBlock(cpp_string)))
+    statements.append(ast.Incr(result_sym, ast.FlatBlock(split(cpp_string))))
 
     # Generate arguments for the macro kernel
     args = [result, ast.Decl("%s **" % SCALAR_TYPE, builder.coord_sym)]
