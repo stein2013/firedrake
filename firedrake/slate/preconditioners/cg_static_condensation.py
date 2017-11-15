@@ -103,8 +103,10 @@ class CGStaticCondensationPC(PCBase):
             bcs=self.bcs,
             form_compiler_parameters=self.cxt.fc_params)
 
-        self._assemble_S()
-        self.S.force_evaluation()
+        with timed_region("SCCondensation"):
+            self._assemble_S()
+            self.S.force_evaluation()
+
         Smat = self.S.petscmat
 
         # Nullspace for the reduced system
