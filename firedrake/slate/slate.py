@@ -28,6 +28,7 @@ from ufl.algorithms.multifunction import MultiFunction
 from ufl.classes import Zero
 from ufl.domain import join_domains
 from ufl.form import Form
+from ufl.finiteelement import MixedElement
 
 
 __all__ = ['AssembledVector', 'IndexedTensor', 'Tensor',
@@ -318,23 +319,39 @@ class IndexedTensor(TensorBase):
         if not isinstance(tensor, TensorBase):
             raise TypeError("Can only index Slate expressions.")
 
+        assert len(idx) == tensor.rank, (
+            "Number of indices must match the tensor rank."
+        )
+
         if not tensor.is_mixed:
             assert all(i == 0 for i in idx)
+            return tensor
+
+        idx_extents = []
+        for arg, i in zip(tensor.arguments(), idx):
+            if type(i) is slice:
+                assert i.step is None or i.step == 1
+                start = i.start
+                stop = i.stop
+            else:
+                start = stop = i
+            idx_extents.append((start, stop))
+
+        if any(not 0 <= n < len(arg.function_space())
+               for n in (start, stop)
+               for (start, stop) in idx_extents):
+            raise ValueError("The mixed tensor does not have "
+                             "field indices '%s'" % idx)
+
+        if all(start == 0 and stop == len(arg.function_space()) - 1
+               for (start, stop), arg in
+               zip(idx_extents, tensor.arguments())):
             return tensor
 
         return super().__new__(cls)
 
     def __init__(self, tensor, idx):
         """Constructor for the IndexedTensor class."""
-        assert len(idx) == tensor.rank, (
-            "Number of indices must match the tensor rank."
-        )
-
-        for arg, i in zip(tensor.arguments(), idx):
-            if not 0 <= i < len(arg.function_space()):
-                raise ValueError("The mixed tensor does not have "
-                                 "field indices '%s'" % idx)
-
         super(IndexedTensor, self).__init__()
         self.operands = (tensor,)
         self._idx = idx
@@ -349,10 +366,15 @@ class IndexedTensor(TensorBase):
 
         tensor, = self.operands
         nargs = []
-        for arg, i in zip(tensor.arguments(), self._idx):
-            fs = arg.function_space().split()[i]
-            # Do not want an indexed subspace of a mixed space
-            W = FunctionSpace(fs.mesh(), fs.ufl_element())
+        for arg, idx in zip(tensor.arguments(), self._idx):
+            mesh = arg.function_space().mesh()
+            if type(idx) is slice:
+                elements = [arg.function_space().split()[i].ufl_element()
+                            for i in range(idx.start, idx.stop + 1)]
+                element = MixedElement(elements)
+            else:
+                element = arg.function_space().split()[i].ufl_element()
+            W = FunctionSpace(mesh, element)
             nargs.append(Argument(W, arg.number(), part=arg.part()))
 
         return nargs
